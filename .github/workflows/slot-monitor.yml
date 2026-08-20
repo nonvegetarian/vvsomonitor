@@ -26,7 +26,7 @@ jobs:
         shell: pwsh
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
-          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           API_BASE: ${{ secrets.API_BASE }}
         run: |
           $cfg = [ordered]@{
@@ -42,7 +42,7 @@ jobs:
             communityLimit = 10
             alertOnChange = $true
             telegramToken = $env:TG_TOKEN
-            telegramChatId = $env:TG_CHAT_ID
+            telegramChatIds = @($env:TG_CHAT_IDS | ConvertFrom-Json)
             alertSpamCount = 5
             stateFile = "state.json"
             logFile = "log.txt"

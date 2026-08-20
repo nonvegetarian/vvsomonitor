@@ -12,7 +12,7 @@
 - `.github/workflows/slot-monitor.yml` - cron `*/5 * * * *` + manual `workflow_dispatch` trigger.
 - `monitor.ps1` - polling engine; runs with `-Once -NoToast`.
 - Alert state is persisted between runs via the GitHub Actions cache, so "newly opened" vs "still open" slots are distinguished correctly.
-- No secrets in this repo. The Telegram bot token and chat ID are provided at runtime via GitHub repository Secrets (`TELEGRAM_TOKEN`, `TELEGRAM_CHAT_ID`).
+- No secrets in this repo. The Telegram bot token and recipient chat IDs are provided at runtime via GitHub repository Secrets (`TELEGRAM_TOKEN`, `TELEGRAM_CHAT_IDS`, `API_BASE`).
 
 ## Configuration
 
@@ -21,7 +21,8 @@ Set these repository secrets:
 | Secret | Value |
 | --- | --- |
 | `TELEGRAM_TOKEN` | Bot token from @BotFather |
-| `TELEGRAM_CHAT_ID` | Your Telegram chat ID |
+| `TELEGRAM_CHAT_IDS` | JSON array of recipient chat IDs, e.g. `["111111111","222222222"]` |
+| `API_BASE` | Base URL of the slot availability API |
 
 Trigger manually anytime with the **Run workflow** button in the Actions tab.
 

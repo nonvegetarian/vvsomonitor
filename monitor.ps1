@@ -134,24 +134,29 @@ function Escape-Html {
 }
 
 function Send-Telegram {
-    param([string]$Text)
-    if (-not $Script:Config.telegramToken -or -not $Script:Config.telegramChatId) { return $false }
-    try {
-        $url = "https://api.telegram.org/bot{0}/sendMessage" -f $Script:Config.telegramToken
-        $body = @{
-            chat_id = [string]$Script:Config.telegramChatId
-            text = $Text
-            parse_mode = "HTML"
-            disable_web_page_preview = $true
+    param([string]$Text, [int]$RecipientDelayMs = 300)
+    $ids = @($Script:Config.telegramChatIds)
+    if (-not $Script:Config.telegramToken -or $ids.Count -eq 0) { return $false }
+    $ok = 0
+    foreach ($chatId in $ids) {
+        try {
+            $url = "https://api.telegram.org/bot{0}/sendMessage" -f $Script:Config.telegramToken
+            $body = @{
+                chat_id = [string]$chatId
+                text = $Text
+                parse_mode = "HTML"
+                disable_web_page_preview = $true
+            }
+            $json = $body | ConvertTo-Json -Compress
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+            $null = Invoke-RestMethod -Method Post -Uri $url -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 20
+            $ok++
+            Start-Sleep -Milliseconds $RecipientDelayMs
+        } catch {
+            Write-Log ("Telegram send failed for chat {0}: {1}" -f $chatId, $_.Exception.Message)
         }
-        $json = $body | ConvertTo-Json -Compress
-        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
-        $null = Invoke-RestMethod -Method Post -Uri $url -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 20
-        return $true
-    } catch {
-        Write-Log ("Telegram send failed: {0}" -f $_.Exception.Message)
-        return $false
     }
+    return ($ok -gt 0)
 }
 
 function Build-StatusMessage {
@@ -433,7 +438,7 @@ function Poll-Once {
     $snap | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Script:StatePath -Encoding UTF8
 
     # Telegram: always send the full status update
-    if ($Script:Config.telegramToken -and $Script:Config.telegramChatId) {
+    if ($Script:Config.telegramToken -and $Script:Config.telegramChatIds) {
         $statusText = Build-StatusMessage $snap
         if (Send-Telegram -Text $statusText) {
             Write-Log ("Telegram status sent ({0} cities)" -f $snap.live.Count)
@@ -442,7 +447,7 @@ function Poll-Once {
 
     # Telegram: newly-open slots => ALERT spam in caps + emojis
     $newlyOpen = @($open | Where-Object { $_ -notin $prevOpen })
-    if ($newlyOpen.Count -gt 0 -and $Script:Config.telegramToken -and $Script:Config.telegramChatId) {
+    if ($newlyOpen.Count -gt 0 -and $Script:Config.telegramToken -and $Script:Config.telegramChatIds) {
         $alertText = Build-AlertMessage $snap $open
         $spam = [int]$Script:Config.alertSpamCount
         if ($spam -lt 1) { $spam = 1 }
@@ -491,8 +496,8 @@ if ($TestToast) {
 }
 
 if ($TestTelegram) {
-    if (-not $Script:Config.telegramToken -or -not $Script:Config.telegramChatId) {
-        Write-Log "Telegram not configured - add telegramToken + telegramChatId to config.json"
+    if (-not $Script:Config.telegramToken -or -not $Script:Config.telegramChatIds) {
+        Write-Log "Telegram not configured - add telegramToken + telegramChatIds to config.json"
         exit 1
     }
     $msg = "🧪 <b>Volant Visa Slots Monitor</b>`nTest message from your PC - {0}" -f (Get-Date -Format "MMM d, h:mm tt")
@@ -500,8 +505,8 @@ if ($TestTelegram) {
 }
 
 if ($TestAlert) {
-    if (-not $Script:Config.telegramToken -or -not $Script:Config.telegramChatId) {
-        Write-Log "Telegram not configured - add telegramToken + telegramChatId to config.json"
+    if (-not $Script:Config.telegramToken -or -not $Script:Config.telegramChatIds) {
+        Write-Log "Telegram not configured - add telegramToken + telegramChatIds to config.json"
         exit 1
     }
     $sample = @{ live = @{
