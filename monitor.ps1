@@ -1,8 +1,7 @@
 ﻿<#
 .SYNOPSIS
-    Volant Visa Slots Monitor - polls the public API behind the "Fetch Latest
-    Data" button on https://visaslotsguru.com/slots and shows a Windows toast
-    notification whenever slot availability changes. Runs 24/7.
+    Volant Visa Slots Monitor - polls the public visa slot availability API
+    and sends Telegram alerts whenever slots open. Runs 24/7.
 
 .PARAMETER ConfigPath
     Path to config.json (default: alongside this script).
@@ -194,7 +193,7 @@ function Build-AlertMessage {
         $lines += $line
     }
     $lines += ""
-    $lines += "⚡ CHECK NOW: https://visaslotsguru.com/slots"
+    $lines += "⚡ CHECK NOW: https://www.usvisascheduling.com/en-US/"
     return $lines -join "`n"
 }
 

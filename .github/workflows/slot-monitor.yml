@@ -27,11 +27,12 @@ jobs:
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          API_BASE: ${{ secrets.API_BASE }}
         run: |
           $cfg = [ordered]@{
             email = ""
             password = ""
-            apiBase = "https://visaslotsguru.com/api"
+            apiBase = $env:API_BASE
             pollMinutes = 5
             startHour = 0
             endHour = 24
@@ -48,7 +49,7 @@ jobs:
           }
           Set-Content -LiteralPath config.json -Value ($cfg | ConvertTo-Json) -Encoding UTF8
 
-      - name: Poll visaslotsguru.com
+      - name: Poll visa slots API
         shell: pwsh
         run: ./monitor.ps1 -Once -NoToast
 
