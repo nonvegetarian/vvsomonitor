@@ -1,0 +1,59 @@
+name: Slot Monitor
+
+on:
+  schedule:
+    - cron: '*/5 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Restore alert state
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Write config from secrets
+        shell: pwsh
+        env:
+          TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          $cfg = [ordered]@{
+            email = ""
+            password = ""
+            apiBase = "https://visaslotsguru.com/api"
+            pollMinutes = 5
+            startHour = 0
+            endHour = 24
+            country = "India"
+            city = ""
+            visaType = ""
+            communityLimit = 10
+            alertOnChange = $true
+            telegramToken = $env:TG_TOKEN
+            telegramChatId = $env:TG_CHAT_ID
+            alertSpamCount = 5
+            stateFile = "state.json"
+            logFile = "log.txt"
+          }
+          Set-Content -LiteralPath config.json -Value ($cfg | ConvertTo-Json) -Encoding UTF8
+
+      - name: Poll visaslotsguru.com
+        shell: pwsh
+        run: ./monitor.ps1 -Once -NoToast
+
+      - name: Save alert state
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}

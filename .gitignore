@@ -1,0 +1,13 @@
+# secrets and runtime state - never commit
+config.json
+state.json
+log.txt
+err.txt
+out.txt
+
+# build artifacts and local-only files
+*.ico
+*.zip
+*.exe
+*.lnk
+README.txt
