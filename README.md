@@ -1,6 +1,6 @@
 # vvsomonitor
 
-24/7 visa slot monitor for [visaslotsguru.com](https://visaslotsguru.com), running on GitHub Actions.
+24/7 visa slot monitor for india, running on GitHub Actions.
 
 - Polls the public live-slots API every 5 minutes, 24/7, from GitHub's cloud runners.
 - Sends a full per-city / per-visa-type slot status to Telegram after every poll.
