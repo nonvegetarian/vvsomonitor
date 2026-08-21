@@ -54,6 +54,7 @@ jobs:
             staleSeconds = 300
             cvsApiBase = "https://checkvisaslots.com/api/backend/core/retrieve/v1/"
             cvsSession = $env:CVS_SESSION
+            cvsIntervalHours = 1
             ownerChatId = "8877739081"
             stateFile = "state.json"
             logFile = "log.txt"

@@ -219,16 +219,20 @@ function Build-AlertMessage {
     $lines += ""
     foreach ($e in $Evidence) {
         if ($e.source -eq "guru") {
-            $line = "🔴 <b>{0} | {1} SLOTS: {2}</b> | ✅ OCR-verified" -f $e.city.ToUpper(), $e.visaType.ToUpper(), $e.slots
+            $cvsLabel = switch ($e.cvsStatus) {
+                "verified" { "VSG-OCR verified | CVS-OCR verified - both verified" }
+                "unverified" { "VSG-OCR verified | CVS-OCR unverified" }
+                "unchecked" { "VSG-OCR verified | CVS-OCR unchecked" }
+                default { "VSG-OCR verified | CVS-OCR unavailable" }
+            }
+            $line = "🔴 <b>{0} | {1} SLOTS: {2}</b> | ✅ OCR-verified | {3}" -f $e.city.ToUpper(), $e.visaType.ToUpper(), $e.slots, $cvsLabel
             if ($e.earliestDate) { $line += " | 🎯 {0} {1}" -f (Format-Date $e.earliestDate), $e.earliestTime }
             if ($null -ne $e.ageSec) { $line += " | 🕐 data {0}s old" -f $e.ageSec }
-            if ($e.both) { $line += " | ✅✅ confirmed by both sources" }
             $lines += $line
         } else {
             $label = $e.city.ToUpper()
             if ($e.variant) { $label += " ({0})" -f $e.variant }
             $line = "🔴 <b>{0}</b> - openings visible in snippet image | ✅ OCR-verified" -f $label
-            if ($e.both) { $line += " | ✅✅ confirmed by both sources" }
             $lines += $line
         }
     }
@@ -616,6 +620,13 @@ function Poll-Once {
     $hadBaseline = $null -ne $Script:lastState
     $prevOpen = if ($Script:lastState -and $Script:lastState.ContainsKey("_lastOpen")) { @($Script:lastState["_lastOpen"]) } else { @() }
 
+    # determine if CVS should run this cycle: hourly + when guru has verified claims
+    $runCvs = $false
+    $lastCvsCheck = if ($Script:lastState -and $Script:lastState.ContainsKey("_lastCvsCheck")) { [datetime]$Script:lastState["_lastCvsCheck"] } else { [datetime]::MinValue }
+    $cvsIntervalHours = 1
+    if ($Script:Config.cvsIntervalHours) { $cvsIntervalHours = [int]$Script:Config.cvsIntervalHours }
+    if ($nowUtc - $lastCvsCheck -ge [TimeSpan]::FromHours($cvsIntervalHours)) { $runCvs = $true; Write-Log "CVS: hourly check triggered" }
+
     # which city|visaType combos currently have slots (fresh data only)
     $staleSecs = 300
     if ($Script:Config.staleSeconds) { $staleSecs = [int]$Script:Config.staleSeconds }
@@ -640,6 +651,7 @@ function Poll-Once {
     $origin = $Script:Config.apiBase -replace "/api/?$", ""
     $evidence = @()
     $guruOpenCities = @{}
+    $guruVerifiedCities = @{}   # cities where guru has OCR-verified claims
     foreach ($key in $open) {
         $parts = $key -split "\|", 2
         $city = $parts[0]; $vt = $parts[1]
@@ -648,7 +660,7 @@ function Poll-Once {
         $ageSec = $null
         if ($v.lastChecked) { try { $ageSec = [int]($nowUtc - ([datetime]$v.lastChecked).ToUniversalTime()).TotalSeconds } catch { } }
         if ($null -ne $ageSec -and $ageSec -lt 0) { $ageSec = 0 }
-        $rec = @{ source = "guru"; key = $key; city = $city; visaType = $vt; slots = [int]$v.slots; earliestDate = $v.earliestSlotDate; earliestTime = $v.earliestSlotTime; ageSec = $ageSec; screenshotUrl = $null; variant = ""; imagePath = $null; ocr = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; hasNegative = $false }; both = $false }
+        $rec = @{ source = "guru"; key = $key; city = $city; visaType = $vt; slots = [int]$v.slots; earliestDate = $v.earliestSlotDate; earliestTime = $v.earliestSlotTime; ageSec = $ageSec; screenshotUrl = $null; variant = ""; imagePath = $null; ocr = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; hasNegative = $false }; both = $false; cvsStatus = "unchecked" }
         if ($c.screenshotUrl) {
             $rec.screenshotUrl = $origin + $c.screenshotUrl
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ("guru_{0}_{1}_{2}.png" -f ($city -replace "\W", "_"), ($vt -replace "\W", "_"), (Get-Random))
@@ -664,58 +676,79 @@ function Poll-Once {
         }
         Write-Log ("EVIDENCE {0}: verdict=verified dates={1}" -f $key, $rec.ocr.dateCount)
         $guruOpenCities[$city] = $true
+        $guruVerifiedCities[$city] = $true
+        # if guru has verified claim, trigger CVS check for this city
+        $runCvs = $true
         $evidence += $rec
     }
 
-    # ---- CVS snippets (independent second source) ----
+    # ---- CVS snippets (conditional second source) ----
     $cvsExpiredFlag = $false
     if ($Script:lastState -and $Script:lastState.ContainsKey("_cvsExpired")) { $cvsExpiredFlag = [bool]$Script:lastState["_cvsExpired"] }
-    $cvs = Get-CvsSnippets
     $cvsOpenCities = @{}
-    if ($cvs.ok) {
-        if ($cvsExpiredFlag) { $cvsExpiredFlag = $false; Write-Log "CVS session working again" }
-        $cvsAcc = @{}
-        foreach ($item in $cvs.items) {
-            $tmp = Join-Path ([IO.Path]::GetTempPath()) ("cvs_{0}.png" -f (Get-Random))
-            if (-not (Save-RemoteImage -Url $item.url -DestPath $tmp)) { continue }
-            $ev = Test-ScreenshotEvidence -ImagePath $tmp -VisaType ""
-            $consulate = Get-CvsConsulate -FilenameBase $item.base -OcrText $ev.text
-            if (-not $consulate) {
-                Write-Log ("CVS SKIP unidentified snippet '{0}': text='{1}'" -f $item.base, ($ev.excerpt -replace "'", ""))
-                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-                continue
+    $cvsVerifiedCities = @{}
+    if ($runCvs) {
+        Write-Log "CVS: running check"
+        $cvs = Get-CvsSnippets
+        if ($cvs.ok) {
+            if ($cvsExpiredFlag) { $cvsExpiredFlag = $false; Write-Log "CVS session working again" }
+            $cvsAcc = @{}
+            foreach ($item in $cvs.items) {
+                $tmp = Join-Path ([IO.Path]::GetTempPath()) ("cvs_{0}.png" -f (Get-Random))
+                if (-not (Save-RemoteImage -Url $item.url -DestPath $tmp)) { continue }
+                $ev = Test-ScreenshotEvidence -ImagePath $tmp -VisaType ""
+                $consulate = Get-CvsConsulate -FilenameBase $item.base -OcrText $ev.text
+                if (-not $consulate) {
+                    Write-Log ("CVS SKIP unidentified snippet '{0}': text='{1}'" -f $item.base, ($ev.excerpt -replace "'", ""))
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                    continue
+                }
+                $variant = $item.variant
+                if (-not $variant -and $ev.text -match "(?i)\bvac\b") { $variant = "VAC" }
+                Write-Log ("CVS OCR {0}({1}): verdict={2} dates={3} text='{4}'" -f $consulate, $variant, $ev.verdict, $ev.dateCount, ($ev.excerpt -replace "'", ""))
+                if ($ev.verdict -ne "verified" -or $ev.hasNegative) {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                    continue
+                }
+                if (-not $cvsAcc.ContainsKey($consulate)) {
+                    $cvsAcc[$consulate] = @{ shotUrl = $item.url; variant = $variant; imagePath = $tmp }
+                } else {
+                    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                }
             }
-            $variant = $item.variant
-            if (-not $variant -and $ev.text -match "(?i)\bvac\b") { $variant = "VAC" }
-            Write-Log ("CVS OCR {0}({1}): verdict={2} dates={3} text='{4}'" -f $consulate, $variant, $ev.verdict, $ev.dateCount, ($ev.excerpt -replace "'", ""))
-            if ($ev.verdict -ne "verified" -or $ev.hasNegative) {
-                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-                continue
+            foreach ($consulate in $cvsAcc.Keys) {
+                $guruName = Get-GuruCityName -Consulate $consulate
+                $cvsOpenCities[$guruName] = $true
+                $cvsVerifiedCities[$guruName] = $true
+                $evidence += @{ source = "cvs"; key = "CVS|$consulate"; city = $guruName; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $cvsAcc[$consulate].shotUrl; variant = $cvsAcc[$consulate].variant; imagePath = $cvsAcc[$consulate].imagePath; ocr = @{ verdict = "verified"; dateCount = 0; excerpt = ""; hasNegative = $false }; both = $false }
+                Write-Log ("CVS OPENINGS detected: {0}" -f $consulate)
             }
-            if (-not $cvsAcc.ContainsKey($consulate)) {
-                $cvsAcc[$consulate] = @{ shotUrl = $item.url; variant = $variant; imagePath = $tmp }
-            } else {
-                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        } else {
+            if (($cvs.expired -or $cvs.blocked) -and -not $cvsExpiredFlag) {
+                $cvsExpiredFlag = $true
+                $reason = if ($cvs.expired) { "session expired (HTTP 401)" } else { "unreachable - anti-bot block or not configured (HTTP 403)" }
+                Write-Log ("CVS source unavailable: {0} - notifying owner only" -f $reason)
+                $null = Send-TelegramOwner -Text ("🔑 <b>CVS source issue</b>`ncheckvisaslots.com: {0}`nVisaSlotsGuru alerts continue normally." -f $reason)
             }
         }
-        foreach ($consulate in $cvsAcc.Keys) {
-            $guruName = Get-GuruCityName -Consulate $consulate
-            $cvsOpenCities[$guruName] = $true
-            $evidence += @{ source = "cvs"; key = "CVS|$consulate"; city = $guruName; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $cvsAcc[$consulate].shotUrl; variant = $cvsAcc[$consulate].variant; imagePath = $cvsAcc[$consulate].imagePath; ocr = @{ verdict = "verified"; dateCount = 0; excerpt = ""; hasNegative = $false }; both = $false }
-            Write-Log ("CVS OPENINGS detected: {0}" -f $consulate)
-        }
+        $Script:lastState["_lastCvsCheck"] = [datetime]::UtcNow
     } else {
-        if (($cvs.expired -or $cvs.blocked) -and -not $cvsExpiredFlag) {
-            $cvsExpiredFlag = $true
-            $reason = if ($cvs.expired) { "session expired (HTTP 401)" } else { "unreachable - anti-bot block or not configured (HTTP 403)" }
-            Write-Log ("CVS source unavailable: {0} - notifying owner only" -f $reason)
-            $null = Send-TelegramOwner -Text ("🔑 <b>CVS source issue</b>`ncheckvisaslots.com: {0}`nVisaSlotsGuru alerts continue normally." -f $reason)
-        }
+        Write-Log "CVS: skipped (no trigger)"
     }
 
-    # cross-validation badges
+    # cross-validation per guru claim
     foreach ($e in $evidence) {
-        if ($e.source -eq "guru" -and $cvsOpenCities.ContainsKey($e.city)) { $e.both = $true }
+        if ($e.source -eq "guru") {
+            $city = $e.city
+            if ($cvsVerifiedCities.ContainsKey($city)) {
+                $e.cvsStatus = "verified"
+                $e.both = $true
+            } elseif ($runCvs) {
+                $e.cvsStatus = "unverified"
+            } else {
+                $e.cvsStatus = "unchecked"
+            }
+        }
     }
 
     # alert-once over ALERTED keys only (suppressed claims can re-alert later if evidence improves)
@@ -810,8 +843,10 @@ if ($TestTelegram) {
 
 if ($TestAlert) {
     $sample = @(
-        @{ source = "guru"; key = "New Delhi|B1/B2"; city = "New Delhi"; visaType = "B1/B2"; slots = 2; earliestDate = "Aug 27, 2026"; earliestTime = "9:00 AM"; ageSec = 42; screenshotUrl = $null; variant = ""; ocr = @{ verdict = "verified"; dateCount = 3; excerpt = "b1/b2 27 feb 2026" }; both = $true },
-        @{ source = "cvs"; key = "CVS|MUMBAI"; city = "Mumbai"; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $null; variant = "VAC"; ocr = @{ verdict = "verified"; dateCount = 5; excerpt = "mumbai vac earliest dates" }; both = $false }
+        @{ source = "guru"; key = "New Delhi|B1/B2"; city = "New Delhi"; visaType = "B1/B2"; slots = 2; earliestDate = "Aug 27, 2026"; earliestTime = "9:00 AM"; ageSec = 42; screenshotUrl = $null; variant = ""; imagePath = $null; ocr = @{ verdict = "verified"; dateCount = 3; excerpt = "b1/b2 27 feb 2026"; hasNegative = $false }; both = $true; cvsStatus = "verified" },
+        @{ source = "guru"; key = "Chennai|F-1"; city = "Chennai"; visaType = "F-1"; slots = 1; earliestDate = "Sep 10, 2026"; earliestTime = "10:30 AM"; ageSec = 76; screenshotUrl = $null; variant = ""; imagePath = $null; ocr = @{ verdict = "verified"; dateCount = 2; excerpt = "f1 dates"; hasNegative = $false }; both = $false; cvsStatus = "unverified" },
+        @{ source = "guru"; key = "Hyderabad|H-1B"; city = "Hyderabad"; visaType = "H-1B"; slots = 3; earliestDate = "Aug 28, 2026"; earliestTime = "8:00 AM"; ageSec = 30; screenshotUrl = $null; variant = ""; imagePath = $null; ocr = @{ verdict = "verified"; dateCount = 1; excerpt = "h1b"; hasNegative = $false }; both = $false; cvsStatus = "unchecked" },
+        @{ source = "cvs"; key = "CVS|MUMBAI"; city = "Mumbai"; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $null; variant = "VAC"; imagePath = $null; ocr = @{ verdict = "verified"; dateCount = 5; excerpt = "mumbai vac earliest dates"; hasNegative = $false }; both = $false }
     )
     $alert = Build-AlertMessage $sample
     Write-Host "----- alert preview -----"
