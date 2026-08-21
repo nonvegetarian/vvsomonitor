@@ -164,6 +164,7 @@ function Build-AlertMessage {
     $lines = @()
     $lines += "🚨🚨🔴 <b>SLOTS OPEN FOUND! SLOTS OPEN FOUND! SLOTS OPEN FOUND!</b> 🔴🚨🚨"
     $lines += ""
+    $shots = @{}
     foreach ($key in $openKeys) {
         $parts = $key -split "\|", 2
         $city = $parts[0]; $vt = $parts[1]
@@ -175,10 +176,23 @@ function Build-AlertMessage {
         if ($v.earliestSlotDate) {
             $line += " | 🎯 {0} {1}" -f (Format-Date $v.earliestSlotDate), $v.earliestSlotTime
         }
+        if ($v.lastChecked) {
+            try {
+                $age = [int]([datetime]::UtcNow - ([datetime]$v.lastChecked).ToUniversalTime()).TotalSeconds
+                if ($age -lt 0) { $age = 0 }
+                $line += " | 🕐 data {0}s old" -f $age
+            } catch { }
+        }
         $lines += $line
+        if ($c.screenshotUrl -and -not $shots.ContainsKey($city)) { $shots[$city] = $c.screenshotUrl }
     }
     $lines += ""
     $lines += "⚡ CHECK NOW: https://www.usvisascheduling.com/en-US/"
+    $origin = $Script:Config.apiBase -replace "/api/?$", ""
+    foreach ($city in ($shots.Keys | Sort-Object)) {
+        $url = $origin + $shots[$city]
+        $lines += ("📸 <a href=`"{0}`">{1} screenshot proof</a>" -f (Escape-Html $url), (Escape-Html $city))
+    }
     return $lines -join "`n"
 }
 
@@ -280,6 +294,7 @@ function Get-Snapshot {
                     slots           = [int]$v.slots
                     earliestSlotDate = $v.earliestSlotDate
                     earliestSlotTime = $v.earliestSlotTime
+                    lastChecked     = $v.lastChecked
                 }
                 if ([int]$v.slots -gt 0) {
                     if (-not $earliest -or ([string]$v.earliestSlotDate) -lt ([string]$earliest)) {
@@ -291,6 +306,7 @@ function Get-Snapshot {
                 slots        = [int]$c.slots
                 earliestDate = $earliest
                 earliestTime = $earliestTime
+                screenshotUrl = $c.screenshotUrl
                 visaTypes    = $vt
             }
         }
@@ -405,11 +421,24 @@ function Poll-Once {
     $hadBaseline = $null -ne $Script:lastState
     $prevOpen = if ($Script:lastState -and $Script:lastState.ContainsKey("_lastOpen")) { @($Script:lastState["_lastOpen"]) } else { @() }
 
-    # which city|visaType combos currently have slots
+    # which city|visaType combos currently have slots (fresh data only)
+    $staleSecs = 300
+    if ($Script:Config.staleSeconds) { $staleSecs = [int]$Script:Config.staleSeconds }
+    $nowUtc = [datetime]::UtcNow
     $open = @()
     foreach ($city in $snap.live.Keys) {
         foreach ($vt in $snap.live[$city].visaTypes.Keys) {
-            if ([int]$snap.live[$city].visaTypes[$vt].slots -gt 0) { $open += ("{0}|{1}" -f $city, $vt) }
+            $v = $snap.live[$city].visaTypes[$vt]
+            if ([int]$v.slots -le 0) { continue }
+            $age = $null
+            if ($v.lastChecked) {
+                try { $age = [int]($nowUtc - ([datetime]$v.lastChecked).ToUniversalTime()).TotalSeconds } catch { $age = $null }
+            }
+            if ($null -eq $age -or $age -gt $staleSecs) {
+                Write-Log ("STALE SKIP {0}|{1}: slots>0 but data age unknown or >{2}s" -f $city, $vt, $staleSecs)
+                continue
+            }
+            $open += ("{0}|{1}" -f $city, $vt)
         }
     }
     $snap["_lastOpen"] = $open

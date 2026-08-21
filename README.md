@@ -5,6 +5,7 @@
 - Polls the public live-slots API every minute, 24/7, from GitHub's cloud runners.
 - Stays completely silent by default - no routine status messages.
 - When new slots open anywhere, sends a single all-caps alert (with emojis) to all recipients.
+- Staleness guard: openings whose underlying data is older than 5 minutes (`staleSeconds`) are ignored as unreliable; fresh alerts include the data age and a link to the contributor's screenshot as proof.
 
 ## How it works
 

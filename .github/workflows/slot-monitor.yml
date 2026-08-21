@@ -45,6 +45,7 @@ jobs:
             alertOnChange = $true
             telegramToken = $env:TG_TOKEN
             telegramChatIds = @($env:TG_CHAT_IDS | ConvertFrom-Json)
+            staleSeconds = 300
             stateFile = "state.json"
             logFile = "log.txt"
           }
