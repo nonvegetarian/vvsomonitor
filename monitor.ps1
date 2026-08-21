@@ -26,7 +26,8 @@ param(
     [switch]$TestToast,
     [switch]$TestLogin,
     [switch]$TestTelegram,
-    [switch]$TestAlert
+    [switch]$TestAlert,
+    [switch]$ParseCheck
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,6 +44,7 @@ $Script:Token    = $null
 $Script:User     = $null
 $Script:GateWarned  = $false
 $Script:PublicWarned = $false
+$Script:OcrWarned = $false
 $Script:ToastAttempted = $false
 $Script:ToastOk   = $false
 
@@ -159,41 +161,191 @@ function Send-Telegram {
     return ($ok -gt 0)
 }
 
+function Send-TelegramOwner {
+    param([string]$Text)
+    $owner = $Script:Config.ownerChatId
+    if (-not $Script:Config.telegramToken -or -not $owner) { return $false }
+    try {
+        $url = "https://api.telegram.org/bot{0}/sendMessage" -f $Script:Config.telegramToken
+        $body = @{
+            chat_id = [string]$owner
+            text = $Text
+            parse_mode = "HTML"
+            disable_web_page_preview = $true
+        }
+        $json = $body | ConvertTo-Json -Compress
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes($json)
+        $null = Invoke-RestMethod -Method Post -Uri $url -ContentType "application/json; charset=utf-8" -Body $bytes -TimeoutSec 20
+        return $true
+    } catch {
+        Write-Log ("Owner Telegram send failed: {0}" -f $_.Exception.Message)
+        return $false
+    }
+}
+
 function Build-AlertMessage {
-    param($snap, $openKeys)
+    param($Evidence)
     $lines = @()
     $lines += "🚨🚨🔴 <b>SLOTS OPEN FOUND! SLOTS OPEN FOUND! SLOTS OPEN FOUND!</b> 🔴🚨🚨"
     $lines += ""
     $shots = @{}
-    foreach ($key in $openKeys) {
-        $parts = $key -split "\|", 2
-        $city = $parts[0]; $vt = $parts[1]
-        $c = $snap.live[$city]
-        if (-not $c) { continue }
-        $v = $c.visaTypes[$vt]
-        if (-not $v) { continue }
-        $line = ("🔴 <b>{0} | {1} SLOTS: {2}</b> ⚠️" -f $city.ToUpper(), $vt.ToUpper(), $v.slots)
-        if ($v.earliestSlotDate) {
-            $line += " | 🎯 {0} {1}" -f (Format-Date $v.earliestSlotDate), $v.earliestSlotTime
+    foreach ($e in $Evidence) {
+        $badge = "⚠️ unverified"
+        if ($e.ocr.verdict -eq "verified") { $badge = "✅ OCR-verified" }
+        $cross = ""
+        if ($e.both) { $cross = " | ✅✅ confirmed by both sources" }
+        if ($e.source -eq "guru") {
+            $line = "🔴 <b>{0} | {1} SLOTS: {2}</b> | {3}" -f $e.city.ToUpper(), $e.visaType.ToUpper(), $e.slots, $badge
+            if ($e.earliestDate) { $line += " | 🎯 {0} {1}" -f (Format-Date $e.earliestDate), $e.earliestTime }
+            if ($null -ne $e.ageSec) { $line += " | 🕐 data {0}s old" -f $e.ageSec }
+            $line += $cross
+            $lines += $line
+            if ($e.screenshotUrl -and -not $shots.ContainsKey($e.city)) { $shots[$e.city] = $e.screenshotUrl }
+        } else {
+            $label = $e.city.ToUpper()
+            if ($e.variant) { $label += " ({0})" -f $e.variant }
+            $line = "🔴 <b>{0}</b> - openings visible in snippet | {1}" -f $label, $badge
+            $line += $cross
+            $lines += $line
+            if ($e.screenshotUrl) { $shots[("{0} snippet" -f $e.city)] = $e.screenshotUrl }
         }
-        if ($v.lastChecked) {
-            try {
-                $age = [int]([datetime]::UtcNow - ([datetime]$v.lastChecked).ToUniversalTime()).TotalSeconds
-                if ($age -lt 0) { $age = 0 }
-                $line += " | 🕐 data {0}s old" -f $age
-            } catch { }
-        }
-        $lines += $line
-        if ($c.screenshotUrl -and -not $shots.ContainsKey($city)) { $shots[$city] = $c.screenshotUrl }
     }
     $lines += ""
     $lines += "⚡ CHECK NOW: https://www.usvisascheduling.com/en-US/"
-    $origin = $Script:Config.apiBase -replace "/api/?$", ""
-    foreach ($city in ($shots.Keys | Sort-Object)) {
-        $url = $origin + $shots[$city]
-        $lines += ("📸 <a href=`"{0}`">{1} screenshot proof</a>" -f (Escape-Html $url), (Escape-Html $city))
+    foreach ($k in ($shots.Keys | Sort-Object)) {
+        $lines += ("📸 <a href=`"{0}`">{1} proof</a>" -f (Escape-Html ([string]$shots[$k])), (Escape-Html $k))
     }
     return $lines -join "`n"
+}
+
+# ---------- evidence / ocr ----------
+function Get-VisaKeywords {
+    param([string]$VisaType)
+    $v = ($VisaType -replace "[^A-Za-z0-9]", "").ToLower()
+    if ($v -match "^b1b2$" -or $v -match "^b1$" -or $v -match "^b2$") { return @("b1", "b2", "b1/b2", "b1-b2", "tourist", "business") }
+    if ($v -match "^f1$")  { return @("f1", "f-1", "student") }
+    if ($v -match "^h1b" -or $v -match "^h2" -or $v -match "^h3" -or $v -match "^ewi") { return @("h1b", "h-1b", "h2a", "h2b", "h3", "work") }
+    if ($v -match "^l1$")  { return @("l1", "l-1") }
+    if ($v -match "^l2$")  { return @("l2", "l-2") }
+    if ($v -match "^j1$")  { return @("j1", "j-1", "exchange") }
+    if ($v -match "^o1$")  { return @("o1", "extraordinary ability") }
+    if ($v -match "^c1d")  { return @("c1/d", "c1d", "crew") }
+    if ($v -match "^i+$")  { return @("media", "press") }
+    return @()
+}
+
+function Invoke-OcrText {
+    param([string]$ImagePath)
+    if (-not (Get-Command tesseract -ErrorAction SilentlyContinue)) {
+        if (-not $Script:OcrWarned) {
+            $Script:OcrWarned = $true
+            Write-Log "WARNING: tesseract not installed - OCR verification disabled (all evidence marked unverified)"
+        }
+        return $null
+    }
+    try {
+        $out = & tesseract $ImagePath stdout --psm 6 2>&1
+        $text = ($out | Where-Object { $_ -is [string] }) -join "`n"
+        return $text
+    } catch {
+        Write-Log ("OCR failed for {0}: {1}" -f $ImagePath, $_.Exception.Message)
+        return $null
+    }
+}
+
+function Save-RemoteImage {
+    param([string]$Url, [string]$DestPath)
+    try {
+        $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+        Invoke-WebRequest -Uri $Url -OutFile $DestPath -TimeoutSec 30 -UseBasicParsing -Headers @{ "User-Agent" = $ua }
+        return (Test-Path -LiteralPath $DestPath)
+    } catch {
+        Write-Log ("Image download failed ({0}): {1}" -f $Url, $_.Exception.Message)
+        return $false
+    }
+}
+
+function Test-ScreenshotEvidence {
+    param([string]$ImagePath, [string]$VisaType)
+    $result = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; text = "" }
+    $text = Invoke-OcrText -ImagePath $ImagePath
+    if ($null -eq $text) { return $result }
+    $result.text = $text
+    $low = $text.ToLower()
+    $excerpt = ($low -replace "\s+", " ").Trim()
+    if ($excerpt.Length -gt 160) { $excerpt = $excerpt.Substring(0, 160) }
+    $result.excerpt = $excerpt
+
+    $negatives = @("no slots", "no appointment", "no dates available", "no availability", "no available dates", "fully booked", "no visa appointment", "slots are not available", "no dates")
+    $hasNegative = $false
+    foreach ($n in $negatives) { if ($low.Contains($n)) { $hasNegative = $true; break } }
+
+    $matched = @{}
+    $patterns = @(
+        '(?i)\b\d{1,2}[-/\. ](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}[-/\. ]\d{2,4}\b',
+        '(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?\s+\d{1,2}(st|nd|rd|th)?,?\s*\d{4}\b',
+        '\b\d{1,2}/\d{1,2}/\d{2,4}\b',
+        '(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?,?\s+\d{4}\b'
+    )
+    foreach ($p in $patterns) {
+        foreach ($m in [regex]::Matches($text, $p)) { $matched[$m.Value.ToLower()] = $true }
+    }
+    $count = $matched.Count
+    $result.dateCount = $count
+
+    if ($count -eq 0 -and $hasNegative) { $result.verdict = "suppressed"; return $result }
+
+    $kw = Get-VisaKeywords -VisaType $VisaType
+    $flavorHit = ($kw.Count -eq 0)
+    foreach ($k in $kw) { if ($low.Contains($k)) { $flavorHit = $true; break } }
+
+    if ($count -gt 0 -and $flavorHit) { $result.verdict = "verified" } else { $result.verdict = "unverified" }
+    return $result
+}
+
+function Get-CvsSnippets {
+    # returns @{ ok; expired; blocked; items = @( @{consulate;variant;url;createdon} ) }
+    $res = @{ ok = $false; expired = $false; blocked = $false; items = @() }
+    if (-not $Script:Config.cvsSession) {
+        $res.blocked = $true
+        Write-Log "CVS source not configured (no session)"
+        return $res
+    }
+    $ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36"
+    try {
+        $r = Invoke-WebRequest -Uri $Script:Config.cvsApiBase -Method GET -UseBasicParsing -TimeoutSec 30 -Headers @{
+            "User-Agent" = $ua
+            "Accept"     = "application/json, text/plain, */*"
+            "Referer"    = "https://checkvisaslots.com/visa-slot-snippets/"
+            "Cookie"     = "cvs_session=$($Script:Config.cvsSession)"
+        }
+        $arr = $r.Content | ConvertFrom-Json
+        foreach ($it in $arr) {
+            if (-not $it.img_url) { continue }
+            $path = ([string]$it.img_url -split "\?")[0]
+            $fname = [uri]::UnescapeDataString(($path -split "/")[-1])
+            $base = $fname -replace "\.png$", ""
+            $variant = ""
+            if ($base -match "\sVAC$") { $variant = "VAC"; $base = $base -replace "\sVAC$", "" }
+            $res.items += @{ consulate = $base.ToUpper(); variant = $variant; url = [string]$it.img_url; createdon = [string]$it.createdon }
+        }
+        $res.ok = $true
+        Write-Log ("CVS snippets: {0} image(s) across {1} consulate(s)" -f $res.items.Count, (($res.items | ForEach-Object { $_.consulate } | Select-Object -Unique).Count))
+    } catch {
+        $code = $null
+        try { $code = [int]$_.Exception.Response.StatusCode } catch { }
+        if ($code -eq 401) { $res.expired = $true }
+        elseif ($code -eq 403) { $res.blocked = $true }
+        Write-Log ("CVS snippets fetch failed (HTTP {0}): {1}" -f $code, $_.Exception.Message)
+    }
+    return $res
+}
+
+function Get-GuruCityName {
+    param([string]$Consulate)
+    $map = @{ "NEW DELHI" = "New Delhi"; "MUMBAI" = "Mumbai"; "CHENNAI" = "Chennai"; "HYDERABAD" = "Hyderabad"; "KOLKATA" = "Kolkata" }
+    if ($map.ContainsKey($Consulate)) { return $map[$Consulate] }
+    try { return ((Get-Culture).TextInfo.ToTitleCase($Consulate.ToLower())) } catch { return $Consulate }
 }
 
 # ---------- API ----------
@@ -441,19 +593,105 @@ function Poll-Once {
             $open += ("{0}|{1}" -f $city, $vt)
         }
     }
-    $snap["_lastOpen"] = $open
+    # ---- OCR evidence for guru claims ----
+    $origin = $Script:Config.apiBase -replace "/api/?$", ""
+    $evidence = @()
+    $guruOpenCities = @{}
+    foreach ($key in $open) {
+        $parts = $key -split "\|", 2
+        $city = $parts[0]; $vt = $parts[1]
+        $c = $snap.live[$city]; if (-not $c) { continue }
+        $v = $c.visaTypes[$vt]; if (-not $v) { continue }
+        $ageSec = $null
+        if ($v.lastChecked) { try { $ageSec = [int]($nowUtc - ([datetime]$v.lastChecked).ToUniversalTime()).TotalSeconds } catch { } }
+        if ($null -ne $ageSec -and $ageSec -lt 0) { $ageSec = 0 }
+        $rec = @{ source = "guru"; key = $key; city = $city; visaType = $vt; slots = [int]$v.slots; earliestDate = $v.earliestSlotDate; earliestTime = $v.earliestSlotTime; ageSec = $ageSec; screenshotUrl = $null; variant = ""; ocr = @{ verdict = "unverified"; dateCount = 0; excerpt = "" }; both = $false }
+        if ($c.screenshotUrl) {
+            $rec.screenshotUrl = $origin + $c.screenshotUrl
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ("guru_{0}_{1}.png" -f ($city -replace "\W", "_"), ($vt -replace "\W", "_"))
+            if (Save-RemoteImage -Url $rec.screenshotUrl -DestPath $tmp) {
+                $rec.ocr = Test-ScreenshotEvidence -ImagePath $tmp -VisaType $vt
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            }
+        }
+        if ($rec.ocr.verdict -eq "suppressed") {
+            Write-Log ("SUPPRESS {0}: screenshot shows no openings (OCR)" -f $key)
+            continue
+        }
+        Write-Log ("EVIDENCE {0}: verdict={1} dates={2}" -f $key, $rec.ocr.verdict, $rec.ocr.dateCount)
+        $guruOpenCities[$city] = $true
+        $evidence += $rec
+    }
+
+    # ---- CVS snippets (independent second source) ----
+    $cvsExpiredFlag = $false
+    if ($Script:lastState -and $Script:lastState.ContainsKey("_cvsExpired")) { $cvsExpiredFlag = [bool]$Script:lastState["_cvsExpired"] }
+    $cvs = Get-CvsSnippets
+    $cvsOpenCities = @{}
+    if ($cvs.ok) {
+        if ($cvsExpiredFlag) { $cvsExpiredFlag = $false; Write-Log "CVS session working again" }
+        $byConsulate = @{}
+        foreach ($it in $cvs.items) {
+            if (-not $byConsulate.ContainsKey($it.consulate)) { $byConsulate[$it.consulate] = @() }
+            $byConsulate[$it.consulate] += $it
+        }
+        foreach ($consulate in $byConsulate.Keys) {
+            $detected = $false
+            $bestVerdict = ""
+            $bestExcerpt = ""
+            $shotUrl = $null
+            $variantLabel = ""
+            foreach ($item in $byConsulate[$consulate]) {
+                $tmp = Join-Path ([IO.Path]::GetTempPath()) ("cvs_{0}_{1}.png" -f ($consulate -replace "\W", "_"), ($item.variant -replace "\W", "_"))
+                if (-not (Save-RemoteImage -Url $item.url -DestPath $tmp)) { continue }
+                $ev = Test-ScreenshotEvidence -ImagePath $tmp -VisaType ""
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                if ($ev.verdict -eq "suppressed") { continue }
+                if ($ev.dateCount -gt 0) {
+                    $detected = $true
+                    if (-not $shotUrl) { $shotUrl = $item.url; $variantLabel = $item.variant }
+                    if (-not $bestVerdict -or ($ev.verdict -eq "verified")) { $bestVerdict = $ev.verdict; $bestExcerpt = $ev.excerpt }
+                }
+            }
+            if ($detected) {
+                $guruName = Get-GuruCityName -Consulate $consulate
+                $cvsOpenCities[$guruName] = $true
+                $evidence += @{ source = "cvs"; key = "CVS|$consulate"; city = $guruName; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $shotUrl; variant = $variantLabel; ocr = @{ verdict = $bestVerdict; dateCount = -1; excerpt = $bestExcerpt }; both = $false }
+                Write-Log ("CVS OPENINGS detected: {0}" -f $consulate)
+            }
+        }
+    } else {
+        if (($cvs.expired -or $cvs.blocked) -and -not $cvsExpiredFlag) {
+            $cvsExpiredFlag = $true
+            $reason = if ($cvs.expired) { "session expired (HTTP 401)" } else { "unreachable - anti-bot block or not configured (HTTP 403)" }
+            Write-Log ("CVS source unavailable: {0} - notifying owner only" -f $reason)
+            $null = Send-TelegramOwner -Text ("🔑 <b>CVS source issue</b>`ncheckvisaslots.com: {0}`nVisaSlotsGuru alerts continue normally." -f $reason)
+        }
+    }
+
+    # cross-validation badges
+    foreach ($e in $evidence) {
+        if ($e.source -eq "guru" -and $cvsOpenCities.ContainsKey($e.city)) { $e.both = $true }
+    }
+
+    # alert-once over ALERTED keys only (suppressed claims can re-alert later if evidence improves)
+    $alertKeys = @($evidence | ForEach-Object { $_.key })
+    $snap["_lastOpen"] = $alertKeys
+    $snap["_cvsExpired"] = $cvsExpiredFlag
 
     $Script:lastState = $snap
     $snap | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Script:StatePath -Encoding UTF8
 
     # Telegram: silent unless something NEW opens
-    $newlyOpen = @($open | Where-Object { $_ -notin $prevOpen })
-    if ($newlyOpen.Count -gt 0 -and $Script:Config.telegramToken -and $Script:Config.telegramChatIds) {
-        $alertText = Build-AlertMessage $snap $open
+    $newlyOpen = @($alertKeys | Where-Object { $_ -notin $prevOpen })
+    if ($newlyOpen.Count -gt 0 -and $evidence.Count -gt 0 -and $Script:Config.telegramToken -and $Script:Config.telegramChatIds) {
+        $alertText = Build-AlertMessage $evidence
         Send-Telegram -Text $alertText
         Write-Log ("ALERT sent once: {0}" -f ($newlyOpen -join ", "))
+    } elseif ($evidence.Count -gt 0) {
+        Write-Log ("Openings persist (no new) - staying silent: {0}" -f ($alertKeys -join ", "))
     } else {
-        Write-Log ("No new openings - staying silent ({0} cities checked)" -f $snap.live.Count)
+        Write-Log ("No openings - staying silent ({0} cities checked)" -f $snap.live.Count)
     }
 
     if ($changes.Count -gt 0) {
@@ -469,6 +707,8 @@ function Poll-Once {
         Write-Log ("No changes ({0} live cities, {1} community entries)" -f $snap.live.Count, $snap.community.Count)
     }
 }
+
+if ($ParseCheck) { Write-Host "PARSE OK"; exit 0 }
 
 $Script:lastState = $null
 if (Test-Path -LiteralPath $Script:StatePath) {
@@ -503,16 +743,18 @@ if ($TestTelegram) {
 }
 
 if ($TestAlert) {
-    if (-not $Script:Config.telegramToken -or -not $Script:Config.telegramChatIds) {
-        Write-Log "Telegram not configured - add telegramToken + telegramChatIds to config.json"
-        exit 1
+    $sample = @(
+        @{ source = "guru"; key = "New Delhi|B1/B2"; city = "New Delhi"; visaType = "B1/B2"; slots = 2; earliestDate = "Aug 27, 2026"; earliestTime = "9:00 AM"; ageSec = 42; screenshotUrl = $null; variant = ""; ocr = @{ verdict = "verified"; dateCount = 3; excerpt = "b1/b2 27 feb 2026" }; both = $true },
+        @{ source = "cvs"; key = "CVS|MUMBAI"; city = "Mumbai"; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $null; variant = "VAC"; ocr = @{ verdict = "verified"; dateCount = 5; excerpt = "mumbai vac earliest dates" }; both = $false }
+    )
+    $alert = Build-AlertMessage $sample
+    Write-Host "----- alert preview -----"
+    Write-Host $alert
+    Write-Host "-------------------------"
+    if ($Script:Config.telegramToken -and $Script:Config.ownerChatId) {
+        if (Send-TelegramOwner -Text $alert) { Write-Log "Test ALERT sent to OWNER only"; exit 0 } else { Write-Log "Test ALERT FAILED"; exit 1 }
     }
-    $sample = @{ live = @{
-        "New Delhi" = @{ slots = 2; visaTypes = @{ "B1/B2" = @{ slots = 2; earliestSlotDate = "Aug 27, 2026"; earliestSlotTime = "9:00 AM" } } }
-        "Mumbai"   = @{ slots = 4; visaTypes = @{ "F-1"  = @{ slots = 4; earliestSlotDate = "Aug 26, 2026"; earliestSlotTime = "9:00 AM" } } }
-    } }
-    $alert = Build-AlertMessage $sample @("New Delhi|B1/B2", "Mumbai|F-1")
-    if (Send-Telegram -Text $alert) { Write-Log "Test ALERT sent"; exit 0 } else { Write-Log "Test ALERT FAILED"; exit 1 }
+    exit 0
 }
 
 if ($TestLogin) {
