@@ -1,9 +1,11 @@
 name: Slot Monitor
 
 on:
-  schedule:
-    - cron: '*/5 * * * *'
   workflow_dispatch:
+
+concurrency:
+  group: slot-monitor
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -33,7 +35,7 @@ jobs:
             email = ""
             password = ""
             apiBase = $env:API_BASE
-            pollMinutes = 5
+            pollMinutes = 1
             startHour = 0
             endHour = 24
             country = "India"
@@ -43,7 +45,6 @@ jobs:
             alertOnChange = $true
             telegramToken = $env:TG_TOKEN
             telegramChatIds = @($env:TG_CHAT_IDS | ConvertFrom-Json)
-            alertSpamCount = 5
             stateFile = "state.json"
             logFile = "log.txt"
           }

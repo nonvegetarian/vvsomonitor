@@ -159,26 +159,6 @@ function Send-Telegram {
     return ($ok -gt 0)
 }
 
-function Build-StatusMessage {
-    param($snap)
-    $lines = @()
-    $lines += ("🕐 <b>Volant Visa Slots - {0}</b>" -f (Get-Date -Format "MMM d, h:mm tt"))
-    foreach ($city in ($snap.live.Keys | Sort-Object)) {
-        $c = $snap.live[$city]
-        $lines += ""
-        $lines += ("🏙 City: {0} (total {1})" -f (Escape-Html $city), $c.slots)
-        foreach ($vt in ($c.visaTypes.Keys | Sort-Object)) {
-            $v = $c.visaTypes[$vt]
-            $line = ("   {0} slots: {1}" -f (Escape-Html $vt), $v.slots)
-            if ([int]$v.slots -gt 0 -and $v.earliestSlotDate) {
-                $line += "  🎯 {0} {1}" -f (Format-Date $v.earliestSlotDate), $v.earliestSlotTime
-            }
-            $lines += $line
-        }
-    }
-    return $lines -join "`n"
-}
-
 function Build-AlertMessage {
     param($snap, $openKeys)
     $lines = @()
@@ -437,25 +417,14 @@ function Poll-Once {
     $Script:lastState = $snap
     $snap | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $Script:StatePath -Encoding UTF8
 
-    # Telegram: always send the full status update
-    if ($Script:Config.telegramToken -and $Script:Config.telegramChatIds) {
-        $statusText = Build-StatusMessage $snap
-        if (Send-Telegram -Text $statusText) {
-            Write-Log ("Telegram status sent ({0} cities)" -f $snap.live.Count)
-        }
-    }
-
-    # Telegram: newly-open slots => ALERT spam in caps + emojis
+    # Telegram: silent unless something NEW opens
     $newlyOpen = @($open | Where-Object { $_ -notin $prevOpen })
     if ($newlyOpen.Count -gt 0 -and $Script:Config.telegramToken -and $Script:Config.telegramChatIds) {
         $alertText = Build-AlertMessage $snap $open
-        $spam = [int]$Script:Config.alertSpamCount
-        if ($spam -lt 1) { $spam = 1 }
-        for ($i = 0; $i -lt $spam; $i++) {
-            Send-Telegram -Text $alertText
-            Start-Sleep -Milliseconds 800
-        }
-        Write-Log ("ALERT spam x{0}: {1}" -f $spam, ($newlyOpen -join ", "))
+        Send-Telegram -Text $alertText
+        Write-Log ("ALERT sent once: {0}" -f ($newlyOpen -join ", "))
+    } else {
+        Write-Log ("No new openings - staying silent ({0} cities checked)" -f $snap.live.Count)
     }
 
     if ($changes.Count -gt 0) {
