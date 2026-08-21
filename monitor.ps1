@@ -646,6 +646,7 @@ function Poll-Once {
                 if (-not (Save-RemoteImage -Url $item.url -DestPath $tmp)) { continue }
                 $ev = Test-ScreenshotEvidence -ImagePath $tmp -VisaType ""
                 Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                Write-Log ("CVS OCR {0}({1}): verdict={2} dates={3} text='{4}'" -f $consulate, $item.variant, $ev.verdict, $ev.dateCount, ($ev.excerpt -replace "'", ""))
                 if ($ev.verdict -eq "suppressed") { continue }
                 if ($ev.dateCount -gt 0) {
                     $detected = $true
