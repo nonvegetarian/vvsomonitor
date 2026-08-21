@@ -183,38 +183,58 @@ function Send-TelegramOwner {
     }
 }
 
+function Send-TelegramPhoto {
+    param([string]$ImagePath, [string]$Caption)
+    $ids = @($Script:Config.telegramChatIds)
+    if (-not $Script:Config.telegramToken -or $ids.Count -eq 0 -or -not (Test-Path -LiteralPath $ImagePath)) { return $false }
+    $ok = 0
+    foreach ($chatId in $ids) {
+        try {
+            $url = "https://api.telegram.org/bot{0}/sendPhoto" -f $Script:Config.telegramToken
+            $client = New-Object System.Net.Http.HttpClient
+            $client.Timeout = [TimeSpan]::FromSeconds(60)
+            $form = New-Object System.Net.Http.MultipartFormDataContent
+            $form.Add((New-Object System.Net.Http.StringContent([string]$chatId)), "chat_id")
+            $form.Add((New-Object System.Net.Http.StringContent($Caption)), "caption")
+            $fs = [System.IO.File]::OpenRead($ImagePath)
+            $fileContent = New-Object System.Net.Http.StreamContent($fs)
+            $fileContent.Headers.ContentType = New-Object System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream")
+            $form.Add($fileContent, "photo", ([IO.Path]::GetFileName($ImagePath)))
+            $resp = $client.PostAsync($url, $form).GetAwaiter().GetResult()
+            $fs.Close()
+            $client.Dispose()
+            if ($resp.IsSuccessStatusCode) { $ok++ }
+            Start-Sleep -Milliseconds 300
+        } catch {
+            Write-Log ("Photo send failed for chat {0}: {1}" -f $chatId, $_.Exception.Message)
+        }
+    }
+    return ($ok -gt 0)
+}
+
 function Build-AlertMessage {
     param($Evidence)
     $lines = @()
     $lines += "🚨🚨🔴 <b>SLOTS OPEN FOUND! SLOTS OPEN FOUND! SLOTS OPEN FOUND!</b> 🔴🚨🚨"
     $lines += ""
-    $shots = @{}
     foreach ($e in $Evidence) {
-        $badge = "⚠️ unverified"
-        if ($e.ocr.verdict -eq "verified") { $badge = "✅ OCR-verified" }
-        $cross = ""
-        if ($e.both) { $cross = " | ✅✅ confirmed by both sources" }
         if ($e.source -eq "guru") {
-            $line = "🔴 <b>{0} | {1} SLOTS: {2}</b> | {3}" -f $e.city.ToUpper(), $e.visaType.ToUpper(), $e.slots, $badge
+            $line = "🔴 <b>{0} | {1} SLOTS: {2}</b> | ✅ OCR-verified" -f $e.city.ToUpper(), $e.visaType.ToUpper(), $e.slots
             if ($e.earliestDate) { $line += " | 🎯 {0} {1}" -f (Format-Date $e.earliestDate), $e.earliestTime }
             if ($null -ne $e.ageSec) { $line += " | 🕐 data {0}s old" -f $e.ageSec }
-            $line += $cross
+            if ($e.both) { $line += " | ✅✅ confirmed by both sources" }
             $lines += $line
-            if ($e.screenshotUrl -and -not $shots.ContainsKey($e.city)) { $shots[$e.city] = $e.screenshotUrl }
         } else {
             $label = $e.city.ToUpper()
             if ($e.variant) { $label += " ({0})" -f $e.variant }
-            $line = "🔴 <b>{0}</b> - openings visible in snippet | {1}" -f $label, $badge
-            $line += $cross
+            $line = "🔴 <b>{0}</b> - openings visible in snippet image | ✅ OCR-verified" -f $label
+            if ($e.both) { $line += " | ✅✅ confirmed by both sources" }
             $lines += $line
-            if ($e.screenshotUrl) { $shots[("{0} snippet" -f $e.city)] = $e.screenshotUrl }
         }
     }
     $lines += ""
     $lines += "⚡ CHECK NOW: https://www.usvisascheduling.com/en-US/"
-    foreach ($k in ($shots.Keys | Sort-Object)) {
-        $lines += ("📸 <a href=`"{0}`">{1} proof</a>" -f (Escape-Html ([string]$shots[$k])), (Escape-Html $k))
-    }
+    $lines += "📸 screenshots attached below - this is exactly what OCR read"
     return $lines -join "`n"
 }
 
@@ -280,6 +300,9 @@ function Test-ScreenshotEvidence {
     $hasNegative = $false
     foreach ($n in $negatives) { if ($low.Contains($n)) { $hasNegative = $true; break } }
     $result.hasNegative = $hasNegative
+
+    # if the image explicitly says "no slots" — that beats any date noise; suppress entirely
+    if ($hasNegative) { $result.verdict = "suppressed"; return $result }
 
     # strong = day-level dates (d MMM yyyy / MMM d, yyyy / dd/mm/yyyy); weak = bare month-year (calendar/copyright noise)
     $strong = @{}
@@ -625,20 +648,21 @@ function Poll-Once {
         $ageSec = $null
         if ($v.lastChecked) { try { $ageSec = [int]($nowUtc - ([datetime]$v.lastChecked).ToUniversalTime()).TotalSeconds } catch { } }
         if ($null -ne $ageSec -and $ageSec -lt 0) { $ageSec = 0 }
-        $rec = @{ source = "guru"; key = $key; city = $city; visaType = $vt; slots = [int]$v.slots; earliestDate = $v.earliestSlotDate; earliestTime = $v.earliestSlotTime; ageSec = $ageSec; screenshotUrl = $null; variant = ""; ocr = @{ verdict = "unverified"; dateCount = 0; excerpt = "" }; both = $false }
+        $rec = @{ source = "guru"; key = $key; city = $city; visaType = $vt; slots = [int]$v.slots; earliestDate = $v.earliestSlotDate; earliestTime = $v.earliestSlotTime; ageSec = $ageSec; screenshotUrl = $null; variant = ""; imagePath = $null; ocr = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; hasNegative = $false }; both = $false }
         if ($c.screenshotUrl) {
             $rec.screenshotUrl = $origin + $c.screenshotUrl
-            $tmp = Join-Path ([IO.Path]::GetTempPath()) ("guru_{0}_{1}.png" -f ($city -replace "\W", "_"), ($vt -replace "\W", "_"))
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ("guru_{0}_{1}_{2}.png" -f ($city -replace "\W", "_"), ($vt -replace "\W", "_"), (Get-Random))
             if (Save-RemoteImage -Url $rec.screenshotUrl -DestPath $tmp) {
                 $rec.ocr = Test-ScreenshotEvidence -ImagePath $tmp -VisaType $vt
-                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                $rec.imagePath = $tmp
             }
         }
-        if ($rec.ocr.verdict -eq "suppressed") {
-            Write-Log ("SUPPRESS {0}: screenshot shows no openings (OCR)" -f $key)
+        if ($rec.ocr.verdict -ne "verified") {
+            Write-Log ("SUPPRESS {0}: verdict={1} dates={2} neg={3} text='{4}'" -f $key, $rec.ocr.verdict, $rec.ocr.dateCount, $rec.ocr.hasNegative, ($rec.ocr.excerpt -replace "'", ""))
+            if ($rec.imagePath) { Remove-Item -LiteralPath $rec.imagePath -Force -ErrorAction SilentlyContinue }
             continue
         }
-        Write-Log ("EVIDENCE {0}: verdict={1} dates={2}" -f $key, $rec.ocr.verdict, $rec.ocr.dateCount)
+        Write-Log ("EVIDENCE {0}: verdict=verified dates={1}" -f $key, $rec.ocr.dateCount)
         $guruOpenCities[$city] = $true
         $evidence += $rec
     }
@@ -655,22 +679,29 @@ function Poll-Once {
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ("cvs_{0}.png" -f (Get-Random))
             if (-not (Save-RemoteImage -Url $item.url -DestPath $tmp)) { continue }
             $ev = Test-ScreenshotEvidence -ImagePath $tmp -VisaType ""
-            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
             $consulate = Get-CvsConsulate -FilenameBase $item.base -OcrText $ev.text
             if (-not $consulate) {
                 Write-Log ("CVS SKIP unidentified snippet '{0}': text='{1}'" -f $item.base, ($ev.excerpt -replace "'", ""))
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
                 continue
             }
             $variant = $item.variant
             if (-not $variant -and $ev.text -match "(?i)\bvac\b") { $variant = "VAC" }
             Write-Log ("CVS OCR {0}({1}): verdict={2} dates={3} text='{4}'" -f $consulate, $variant, $ev.verdict, $ev.dateCount, ($ev.excerpt -replace "'", ""))
-            if ($ev.verdict -ne "verified" -or $ev.hasNegative) { continue }
-            if (-not $cvsAcc.ContainsKey($consulate)) { $cvsAcc[$consulate] = @{ shotUrl = $item.url; variant = $variant } }
+            if ($ev.verdict -ne "verified" -or $ev.hasNegative) {
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+                continue
+            }
+            if (-not $cvsAcc.ContainsKey($consulate)) {
+                $cvsAcc[$consulate] = @{ shotUrl = $item.url; variant = $variant; imagePath = $tmp }
+            } else {
+                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            }
         }
         foreach ($consulate in $cvsAcc.Keys) {
             $guruName = Get-GuruCityName -Consulate $consulate
             $cvsOpenCities[$guruName] = $true
-            $evidence += @{ source = "cvs"; key = "CVS|$consulate"; city = $guruName; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $cvsAcc[$consulate].shotUrl; variant = $cvsAcc[$consulate].variant; ocr = @{ verdict = "verified"; dateCount = 0; excerpt = "" }; both = $false }
+            $evidence += @{ source = "cvs"; key = "CVS|$consulate"; city = $guruName; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $cvsAcc[$consulate].shotUrl; variant = $cvsAcc[$consulate].variant; imagePath = $cvsAcc[$consulate].imagePath; ocr = @{ verdict = "verified"; dateCount = 0; excerpt = ""; hasNegative = $false }; both = $false }
             Write-Log ("CVS OPENINGS detected: {0}" -f $consulate)
         }
     } else {
@@ -700,11 +731,33 @@ function Poll-Once {
     if ($newlyOpen.Count -gt 0 -and $evidence.Count -gt 0 -and $Script:Config.telegramToken -and $Script:Config.telegramChatIds) {
         $alertText = Build-AlertMessage $evidence
         Send-Telegram -Text $alertText
-        Write-Log ("ALERT sent once: {0}" -f ($newlyOpen -join ", "))
+        # attach images (max 5, dedupe by city)
+        $sentCities = @{}
+        $count = 0
+        foreach ($e in $evidence) {
+            if ($count -ge 5) { break }
+            $cap = $e.city.ToUpper()
+            if ($e.visaType) { $cap += " | $($e.visaType)" }
+            if ($e.variant) { $cap += " ($($e.variant))" }
+            if ($sentCities.ContainsKey($cap)) { continue }
+            if ($e.imagePath -and (Test-Path -LiteralPath $e.imagePath)) {
+                $caption = "📸 $cap — OCR read this image"
+                Send-TelegramPhoto -ImagePath $e.imagePath -Caption $caption
+                $sentCities[$cap] = $true
+                $count++
+            }
+        }
+        Write-Log ("ALERT sent once: {0} (with $count image(s))" -f ($newlyOpen -join ", "))
     } elseif ($evidence.Count -gt 0) {
         Write-Log ("Openings persist (no new) - staying silent: {0}" -f ($alertKeys -join ", "))
     } else {
         Write-Log ("No openings - staying silent ({0} cities checked)" -f $snap.live.Count)
+    }
+    # cleanup any remaining temp images
+    foreach ($e in $evidence) {
+        if ($e.imagePath -and (Test-Path -LiteralPath $e.imagePath)) {
+            Remove-Item -LiteralPath $e.imagePath -Force -ErrorAction SilentlyContinue
+        }
     }
 
     if ($changes.Count -gt 0) {
