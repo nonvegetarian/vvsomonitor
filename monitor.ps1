@@ -267,7 +267,7 @@ function Save-RemoteImage {
 
 function Test-ScreenshotEvidence {
     param([string]$ImagePath, [string]$VisaType)
-    $result = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; text = "" }
+    $result = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; text = ""; hasNegative = $false }
     $text = Invoke-OcrText -ImagePath $ImagePath
     if ($null -eq $text) { return $result }
     $result.text = $text
@@ -279,21 +279,25 @@ function Test-ScreenshotEvidence {
     $negatives = @("no slots", "no appointment", "no dates available", "no availability", "no available dates", "fully booked", "no visa appointment", "slots are not available", "no dates")
     $hasNegative = $false
     foreach ($n in $negatives) { if ($low.Contains($n)) { $hasNegative = $true; break } }
+    $result.hasNegative = $hasNegative
 
-    $matched = @{}
-    $patterns = @(
+    # strong = day-level dates (d MMM yyyy / MMM d, yyyy / dd/mm/yyyy); weak = bare month-year (calendar/copyright noise)
+    $strong = @{}
+    $weak = @{}
+    $strongPatterns = @(
         '(?i)\b\d{1,2}[-/\. ](jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}[-/\. ]\d{2,4}\b',
         '(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?\s+\d{1,2}(st|nd|rd|th)?,?\s*\d{4}\b',
-        '\b\d{1,2}/\d{1,2}/\d{2,4}\b',
-        '(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?,?\s+\d{4}\b'
+        '\b\d{1,2}/\d{1,2}/\d{2,4}\b'
     )
-    foreach ($p in $patterns) {
-        foreach ($m in [regex]::Matches($text, $p)) { $matched[$m.Value.ToLower()] = $true }
+    foreach ($p in $strongPatterns) {
+        foreach ($m in [regex]::Matches($text, $p)) { $strong[$m.Value.ToLower()] = $true }
     }
-    $count = $matched.Count
+    foreach ($m in [regex]::Matches($text, '(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?,?\s+\d{4}\b')) { $weak[$m.Value.ToLower()] = $true }
+    $count = $strong.Count
     $result.dateCount = $count
 
-    if ($count -eq 0 -and $hasNegative) { $result.verdict = "suppressed"; return $result }
+    # a visible "no slots" banner beats weak date noise; only day-level dates can override it
+    if ($hasNegative -and $count -eq 0) { $result.verdict = "suppressed"; return $result }
 
     $kw = Get-VisaKeywords -VisaType $VisaType
     $flavorHit = ($kw.Count -eq 0)
@@ -301,6 +305,22 @@ function Test-ScreenshotEvidence {
 
     if ($count -gt 0 -and $flavorHit) { $result.verdict = "verified" } else { $result.verdict = "unverified" }
     return $result
+}
+
+function Get-CvsConsulate {
+    param([string]$FilenameBase, [string]$OcrText)
+    $known = [ordered]@{
+        "NEW DELHI" = @("new del", "newdel", "delhi")
+        "HYDERABAD" = @("hyderabad", "hydera")
+        "KOLKATA"   = @("kolkata", "kolka", "calcutta")
+        "CHENNAI"   = @("chennai")
+        "MUMBAI"    = @("mumbai", "mbai", "bombay")
+    }
+    $f = $FilenameBase.ToLower()
+    foreach ($k in $known.Keys) { foreach ($marker in $known[$k]) { if ($f.Contains($marker)) { return $k } } }
+    $t = ($OcrText.ToLower() -replace "[^a-z ]", " ")
+    foreach ($k in $known.Keys) { foreach ($marker in $known[$k]) { if ($t.Contains($marker)) { return $k } } }
+    return $null
 }
 
 function Get-CvsSnippets {
@@ -327,10 +347,10 @@ function Get-CvsSnippets {
             $base = $fname -replace "\.png$", ""
             $variant = ""
             if ($base -match "\sVAC$") { $variant = "VAC"; $base = $base -replace "\sVAC$", "" }
-            $res.items += @{ consulate = $base.ToUpper(); variant = $variant; url = [string]$it.img_url; createdon = [string]$it.createdon }
+            $res.items += @{ base = $base; variant = $variant; url = [string]$it.img_url; createdon = [string]$it.createdon }
         }
         $res.ok = $true
-        Write-Log ("CVS snippets: {0} image(s) across {1} consulate(s)" -f $res.items.Count, (($res.items | ForEach-Object { $_.consulate } | Select-Object -Unique).Count))
+        Write-Log ("CVS snippets: {0} image(s)" -f $res.items.Count)
     } catch {
         $code = $null
         try { $code = [int]$_.Exception.Response.StatusCode } catch { }
@@ -630,36 +650,28 @@ function Poll-Once {
     $cvsOpenCities = @{}
     if ($cvs.ok) {
         if ($cvsExpiredFlag) { $cvsExpiredFlag = $false; Write-Log "CVS session working again" }
-        $byConsulate = @{}
-        foreach ($it in $cvs.items) {
-            if (-not $byConsulate.ContainsKey($it.consulate)) { $byConsulate[$it.consulate] = @() }
-            $byConsulate[$it.consulate] += $it
+        $cvsAcc = @{}
+        foreach ($item in $cvs.items) {
+            $tmp = Join-Path ([IO.Path]::GetTempPath()) ("cvs_{0}.png" -f (Get-Random))
+            if (-not (Save-RemoteImage -Url $item.url -DestPath $tmp)) { continue }
+            $ev = Test-ScreenshotEvidence -ImagePath $tmp -VisaType ""
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+            $consulate = Get-CvsConsulate -FilenameBase $item.base -OcrText $ev.text
+            if (-not $consulate) {
+                Write-Log ("CVS SKIP unidentified snippet '{0}': text='{1}'" -f $item.base, ($ev.excerpt -replace "'", ""))
+                continue
+            }
+            $variant = $item.variant
+            if (-not $variant -and $ev.text -match "(?i)\bvac\b") { $variant = "VAC" }
+            Write-Log ("CVS OCR {0}({1}): verdict={2} dates={3} text='{4}'" -f $consulate, $variant, $ev.verdict, $ev.dateCount, ($ev.excerpt -replace "'", ""))
+            if ($ev.verdict -ne "verified" -or $ev.hasNegative) { continue }
+            if (-not $cvsAcc.ContainsKey($consulate)) { $cvsAcc[$consulate] = @{ shotUrl = $item.url; variant = $variant } }
         }
-        foreach ($consulate in $byConsulate.Keys) {
-            $detected = $false
-            $bestVerdict = ""
-            $bestExcerpt = ""
-            $shotUrl = $null
-            $variantLabel = ""
-            foreach ($item in $byConsulate[$consulate]) {
-                $tmp = Join-Path ([IO.Path]::GetTempPath()) ("cvs_{0}_{1}.png" -f ($consulate -replace "\W", "_"), ($item.variant -replace "\W", "_"))
-                if (-not (Save-RemoteImage -Url $item.url -DestPath $tmp)) { continue }
-                $ev = Test-ScreenshotEvidence -ImagePath $tmp -VisaType ""
-                Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
-                Write-Log ("CVS OCR {0}({1}): verdict={2} dates={3} text='{4}'" -f $consulate, $item.variant, $ev.verdict, $ev.dateCount, ($ev.excerpt -replace "'", ""))
-                if ($ev.verdict -eq "suppressed") { continue }
-                if ($ev.dateCount -gt 0) {
-                    $detected = $true
-                    if (-not $shotUrl) { $shotUrl = $item.url; $variantLabel = $item.variant }
-                    if (-not $bestVerdict -or ($ev.verdict -eq "verified")) { $bestVerdict = $ev.verdict; $bestExcerpt = $ev.excerpt }
-                }
-            }
-            if ($detected) {
-                $guruName = Get-GuruCityName -Consulate $consulate
-                $cvsOpenCities[$guruName] = $true
-                $evidence += @{ source = "cvs"; key = "CVS|$consulate"; city = $guruName; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $shotUrl; variant = $variantLabel; ocr = @{ verdict = $bestVerdict; dateCount = -1; excerpt = $bestExcerpt }; both = $false }
-                Write-Log ("CVS OPENINGS detected: {0}" -f $consulate)
-            }
+        foreach ($consulate in $cvsAcc.Keys) {
+            $guruName = Get-GuruCityName -Consulate $consulate
+            $cvsOpenCities[$guruName] = $true
+            $evidence += @{ source = "cvs"; key = "CVS|$consulate"; city = $guruName; visaType = ""; slots = $null; earliestDate = $null; earliestTime = $null; ageSec = $null; screenshotUrl = $cvsAcc[$consulate].shotUrl; variant = $cvsAcc[$consulate].variant; ocr = @{ verdict = "verified"; dateCount = 0; excerpt = "" }; both = $false }
+            Write-Log ("CVS OPENINGS detected: {0}" -f $consulate)
         }
     } else {
         if (($cvs.expired -or $cvs.blocked) -and -not $cvsExpiredFlag) {
