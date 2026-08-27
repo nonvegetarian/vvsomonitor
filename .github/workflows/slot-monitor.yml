@@ -35,7 +35,6 @@ jobs:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           API_BASE: ${{ secrets.API_BASE }}
-          CVS_SESSION: ${{ secrets.CVS_SESSION }}
         run: |
           $cfg = [ordered]@{
             email = ""
@@ -52,10 +51,6 @@ jobs:
             telegramToken = $env:TG_TOKEN
             telegramChatIds = @($env:TG_CHAT_IDS | ConvertFrom-Json)
             staleSeconds = 300
-            cvsApiBase = "https://checkvisaslots.com/api/backend/core/retrieve/v1/"
-            cvsSession = $env:CVS_SESSION
-            cvsIntervalHours = 1
-            ownerChatId = "8877739081"
             stateFile = "state.json"
             logFile = "log.txt"
           }
