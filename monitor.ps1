@@ -293,7 +293,7 @@ function Test-ScreenshotEvidence {
     foreach ($k in $kw) { if ($low.Contains($k)) { $flavorHit = $true; $result.keywordsMatched += $k } }
 
     # DEBUG LOGGING - always enabled for now
-    $dbg = "OCR DEBUG {0}: raw_len={1} neg={2} strong={3} weak={4} kw_matched={5} flavorHit={6} verdict={7}" -f $VisaType, $text.Length, $hasNegative, ($result.strongDates -join ','), ($result.weakDates -join ','), ($result.keywordsMatched -join ','), $flavorHit
+    $dbg = "OCR DEBUG {0}: raw_len={1} neg={2} strong={3} weak={4} kw_matched={5} flavorHit={6} verdict={7}" -f $VisaType, $text.Length, $hasNegative, ($result.strongDates -join ','), ($result.weakDates -join ','), ($result.keywordsMatched -join ','), $flavorHit, $result.verdict
     Write-Log $dbg
 
     # if the image explicitly says "no slots" — that beats any date noise; suppress entirely
