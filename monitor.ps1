@@ -256,7 +256,7 @@ function Save-RemoteImage {
 
 function Test-ScreenshotEvidence {
     param([string]$ImagePath, [string]$VisaType)
-    $result = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; text = ""; hasNegative = $false }
+    $result = @{ verdict = "unverified"; dateCount = 0; excerpt = ""; text = ""; hasNegative = $false; strongDates = @(); weakDates = @(); keywordsMatched = @() }
     $text = Invoke-OcrText -ImagePath $ImagePath
     if ($null -eq $text) { return $result }
     $result.text = $text
@@ -270,9 +270,6 @@ function Test-ScreenshotEvidence {
     foreach ($n in $negatives) { if ($low.Contains($n)) { $hasNegative = $true; break } }
     $result.hasNegative = $hasNegative
 
-    # if the image explicitly says "no slots" — that beats any date noise; suppress entirely
-    if ($hasNegative) { $result.verdict = "suppressed"; return $result }
-
     # strong = day-level dates (d MMM yyyy / MMM d, yyyy / dd/mm/yyyy); weak = bare month-year (calendar/copyright noise)
     $strong = @{}
     $weak = @{}
@@ -285,15 +282,22 @@ function Test-ScreenshotEvidence {
         foreach ($m in [regex]::Matches($text, $p)) { $strong[$m.Value.ToLower()] = $true }
     }
     foreach ($m in [regex]::Matches($text, '(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]{0,6}\.?,?\s+\d{4}\b')) { $weak[$m.Value.ToLower()] = $true }
+    $result.strongDates = $strong.Keys | Sort-Object
+    $result.weakDates = $weak.Keys | Sort-Object
     $count = $strong.Count
     $result.dateCount = $count
 
-    # a visible "no slots" banner beats weak date noise; only day-level dates can override it
-    if ($hasNegative -and $count -eq 0) { $result.verdict = "suppressed"; return $result }
-
     $kw = Get-VisaKeywords -VisaType $VisaType
+    $result.keywordsMatched = @()
     $flavorHit = ($kw.Count -eq 0)
-    foreach ($k in $kw) { if ($low.Contains($k)) { $flavorHit = $true; break } }
+    foreach ($k in $kw) { if ($low.Contains($k)) { $flavorHit = $true; $result.keywordsMatched += $k } }
+
+    # DEBUG LOGGING - always enabled for now
+    $dbg = "OCR DEBUG {0}: raw_len={1} neg={2} strong={3} weak={4} kw_matched={5} flavorHit={6} verdict={7}" -f $VisaType, $text.Length, $hasNegative, ($result.strongDates -join ','), ($result.weakDates -join ','), ($result.keywordsMatched -join ','), $flavorHit
+    Write-Log $dbg
+
+    # if the image explicitly says "no slots" — that beats any date noise; suppress entirely
+    if ($hasNegative) { $result.verdict = "suppressed"; return $result }
 
     if ($count -gt 0 -and $flavorHit) { $result.verdict = "verified" } else { $result.verdict = "unverified" }
     return $result
@@ -560,6 +564,7 @@ function Poll-Once {
             $rec.screenshotUrl = $origin + $c.screenshotUrl
             $tmp = Join-Path ([IO.Path]::GetTempPath()) ("guru_{0}_{1}_{2}.png" -f ($city -replace "\W", "_"), ($vt -replace "\W", "_"), (Get-Random))
             if (Save-RemoteImage -Url $rec.screenshotUrl -DestPath $tmp) {
+                Write-Log ("OCR CHECK {0}: url={1}" -f $key, $rec.screenshotUrl)
                 $rec.ocr = Test-ScreenshotEvidence -ImagePath $tmp -VisaType $vt
                 $rec.imagePath = $tmp
             }
