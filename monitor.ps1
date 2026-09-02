@@ -519,10 +519,11 @@ function Poll-Once {
     if ($snap.canViewSlots -eq $false) {
         if (-not $Script:GateWarned) {
             $Script:GateWarned = $true
-            Write-Log "WARNING: canViewSlots=false (need 5 contributions today or a paid plan)"
-            if (-not $NoToast) { Show-Notification -Title "Volant Visa Slots Monitor" -Message "Slot access is currently gated. Contribute 5 checks today or upgrade to keep monitoring." }
+            Write-Log "WARNING: canViewSlots=false (need 5 contributions today or a paid plan) - using live grid only"
         }
-        return
+        # Continue with live grid data only; community feed skipped
+    } else {
+        # community feed will be fetched in Get-Snapshot when canViewSlots=true
     }
 
     $changes = Get-Diff -Old $Script:lastState -New $snap
