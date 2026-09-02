@@ -196,14 +196,15 @@ function Build-AlertMessage {
     $lines += "🚨🚨🔴 <b>SLOTS OPEN FOUND! SLOTS OPEN FOUND! SLOTS OPEN FOUND!</b> 🔴🚨🚨"
     $lines += ""
     foreach ($e in $Evidence) {
-        $line = "🔴 <b>{0} | {1} SLOTS: {2}</b> | ✅ OCR-verified" -f $e.city.ToUpper(), $e.visaType.ToUpper(), $e.slots
+        $line = "🔴 <b>{0} | {1} SLOTS: {2}</b> | 🟢 per VSG live count" -f $e.city.ToUpper(), $e.visaType.ToUpper(), $e.slots
         if ($e.earliestDate) { $line += " | 🎯 {0} {1}" -f (Format-Date $e.earliestDate), $e.earliestTime }
         if ($null -ne $e.ageSec) { $line += " | 🕐 data {0}s old" -f $e.ageSec }
         $lines += $line
+        if ($e.ocr -and $e.ocr.hasNegative) { $lines += "⚠️ latest VSG screenshot reads 'no slots' - verify before acting" }
     }
     $lines += ""
     $lines += "⚡ CHECK NOW: https://www.usvisascheduling.com/en-US/"
-    $lines += "📸 screenshots attached below - this is exactly what OCR read"
+    $lines += "📸 VSG community screenshots attached below"
     return $lines -join "`n"
 }
 
@@ -569,12 +570,10 @@ function Poll-Once {
                 $rec.imagePath = $tmp
             }
         }
-        if ($rec.ocr.verdict -ne "verified") {
-            Write-Log ("SUPPRESS {0}: verdict={1} dates={2} neg={3} text='{4}'" -f $key, $rec.ocr.verdict, $rec.ocr.dateCount, $rec.ocr.hasNegative, ($rec.ocr.excerpt -replace "'", ""))
-            if ($rec.imagePath) { Remove-Item -LiteralPath $rec.imagePath -Force -ErrorAction SilentlyContinue }
-            continue
+        if ($rec.ocr.hasNegative) {
+            Write-Log ("WARN {0}: VSG count says open but screenshot reads 'no slots' (verdict={1})" -f $key, $rec.ocr.verdict)
         }
-        Write-Log ("EVIDENCE {0}: verdict=verified dates={1}" -f $key, $rec.ocr.dateCount)
+        Write-Log ("EVIDENCE {0}: slots={1} OCR verdict={2} dates={3} neg={4}" -f $key, $rec.slots, $rec.ocr.verdict, $rec.ocr.dateCount, $rec.ocr.hasNegative)
         $evidence += $rec
     }
 
@@ -600,7 +599,7 @@ function Poll-Once {
             if ($e.variant) { $cap += " ($($e.variant))" }
             if ($sentCities.ContainsKey($cap)) { continue }
             if ($e.imagePath -and (Test-Path -LiteralPath $e.imagePath)) {
-                $caption = "📸 $cap — OCR read this image"
+                $caption = "📸 $cap — VSG community screenshot"
                 Send-TelegramPhoto -ImagePath $e.imagePath -Caption $caption
                 $sentCities[$cap] = $true
                 $count++
