@@ -35,10 +35,12 @@ jobs:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
           API_BASE: ${{ secrets.API_BASE }}
+          VSG_EMAIL: ${{ secrets.VSG_EMAIL }}
+          VSG_PASSWORD: ${{ secrets.VSG_PASSWORD }}
         run: |
           $cfg = [ordered]@{
-            email = ""
-            password = ""
+            email = if ($env:VSG_EMAIL) { $env:VSG_EMAIL } else { "" }
+            password = if ($env:VSG_PASSWORD) { $env:VSG_PASSWORD } else { "" }
             apiBase = $env:API_BASE
             pollMinutes = 1
             startHour = 0
