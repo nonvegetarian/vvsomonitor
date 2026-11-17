@@ -34,10 +34,13 @@ jobs:
         env:
           TG_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TG_CHAT_IDS: ${{ secrets.TELEGRAM_CHAT_IDS }}
+          TG_CHAT_IDS_EXTRA: ${{ secrets.TELEGRAM_CHAT_IDS_EXTRA }}
           API_BASE: ${{ secrets.API_BASE }}
           VSG_EMAIL: ${{ secrets.VSG_EMAIL }}
           VSG_PASSWORD: ${{ secrets.VSG_PASSWORD }}
         run: |
+          $existingIds = if ($env:TG_CHAT_IDS) { @($env:TG_CHAT_IDS | ConvertFrom-Json | Where-Object { $_ }) } else { @() }
+          $extraIds = if ($env:TG_CHAT_IDS_EXTRA) { @($env:TG_CHAT_IDS_EXTRA | ConvertFrom-Json | Where-Object { $_ }) } else { @() }
           $cfg = [ordered]@{
             email = if ($env:VSG_EMAIL) { $env:VSG_EMAIL } else { "" }
             password = if ($env:VSG_PASSWORD) { $env:VSG_PASSWORD } else { "" }
@@ -51,7 +54,7 @@ jobs:
             communityLimit = 10
             alertOnChange = $true
             telegramToken = $env:TG_TOKEN
-            telegramChatIds = @($env:TG_CHAT_IDS | ConvertFrom-Json)
+            telegramChatIds = @($existingIds + $extraIds)
             staleSeconds = 300
             stateFile = "state.json"
             logFile = "log.txt"
